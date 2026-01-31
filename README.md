@@ -1,23 +1,68 @@
+> [!IMPORTANT]
+> **Help Wanted – Reverse Engineering**
+>
+> I’m looking for anyone who can help reverse engineer the game’s geometry format (`.geo`) files.
+> I’ve tried cracking it many times with no success so far.
+>
+> Any help would be **greatly appreciated**.
+
 # ZOMBI-Manager
-This is a python app that allows you to browse ZOMBI(U)'s files. Theres also a WIP importer that allows you to (hopefully) mod the game
 
-If you need help on what .bfz's contain which. There is a text file in the main repository called 'WOR Descriptions' that contains the wor (bfz)'s name, and then what its path was when the game was being compiled (sourced from debug logs in the game off tcrf), this should allow you to make guesses
+**ZOMBI-Manager** is a Python application for browsing and extracting files from **ZOMBI(U)** archives.  
+It also includes a **work-in-progress importer** intended to eventually support modding the game.
 
-# Get started
-To get started, you'll need python3 and some dependencies, here are the things my tool needs (I might've missed a few, been awhile)
+The main focus of the tool is exploring `.bfz` archive files and inspecting their contents.
 
-PySide6 python-lzo Pillow numpy
 
-Next, simply just download the repo, go to the ZOMBIManager folder, and run the "zombiManager.py". It should open up a nice menu
+> [!WARNING]
+> In its current state, the importer is currently broken, as it just loses too much data when trying to convert it to a `.bfz` file.
+>
+> It will be reworked in the future to actually function correctly (it will ask you to pick a 'base' file to use as a start to import the new / replaced data.
 
-# How to use
-Go to file -> and import and select a .bfz file (they are located in your ZOMBI folder's Data folder)
-It should load and you can sort through all the files
-Selecting a file will show it on the right panel, currently it just shows the name, the HEX view + the string view
-If its a .son (audio), it should allow you to play it back
+---
 
-Right clicking on the file on the left-side panel will allow you to export the file, exporting it raw will export the file as it is in the archive (if you want the raw .son files)
-You can also export all the files of the .bfz to a folder
+## What this tool can do
 
-# Currently supported formats:
-.son (Sound file, allows you to play it back in the Manager, and can export it as .wav)
+- Open and browse `.bfz` archive files
+- View contained files in:
+  - Hex view
+  - String view
+- Play back `.son` audio files
+- Export:
+  - Individual files (raw or converted)
+  - Entire archives to a folder
+
+---
+
+## Understanding `.bfz` files
+
+If you need help figuring out what different `.bfz` files contain:
+
+- See **`WOR Descriptions`** in the root of the repository
+- This file lists:
+  - The WOR / `.bfz` name
+  - Its original path during game compilation
+
+The paths were sourced from debug logs found in the game (via TCRF), and can help you make educated guesses about each archive’s contents.
+
+---
+
+## Getting Started
+
+### Requirements
+
+- **Python 3**
+- The following Python dependencies (I may have missed one or two — it’s been a while):
+  - `PySide6`
+  - `python-lzo`
+  - `Pillow`
+  - `numpy`
+
+### Running the app
+
+1. Download or clone the repository
+2. Navigate to the `ZOMBIManager` folder
+3. Run:
+
+   ```bash
+   python zombiManager.py
