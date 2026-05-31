@@ -1,11 +1,3 @@
-> [!IMPORTANT]
-> **Help Wanted – Reverse Engineering**
->
-> I’m looking for anyone who can help reverse engineer the game’s geometry format (`.geo`) files.
-> I’ve tried cracking it many times with no success so far.
->
-> Any help would be **greatly appreciated**.
-
 # ZOMBI-Manager
 
 **ZOMBI-Manager** is a Python application for browsing and extracting files from **ZOMBI(U)** archives.  
