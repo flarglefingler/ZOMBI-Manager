@@ -47,6 +47,12 @@ The paths were sourced from debug logs found in the game (via TCRF), and can hel
 
 ---
 
+## Blender
+
+In 'BlenderPlugins' you will find a 'import_zombiu_geo.py', this allows you to import the .geo files from the files into Blender. It is still a work in progress.
+
+---
+
 ## Getting Started
 
 ### Requirements
