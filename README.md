@@ -36,19 +36,12 @@ The `BlenderPlugins` folder contains Blender add-ons I made for ZOMBI / ZombiU f
 
 ### `import_zombiu_geo`
 
-`import_zombiu_geo` is a work-in-progress Blender importer for the game’s `.geo` model format.
+`import_zombiu_geo` is a work-in-progress Blender importer for the game's formats.
 
 Current features:
-
-- Imports observed PC `.geo` mesh files
-- Imports submeshes as separate Blender objects when possible
-- Reads UVs and custom normals
-- Uses GEO source names for Blender object names
-- Tries to find nearby texture files
-- Automatically converts matched `.tdt` textures to PNG when needed
-- Assigns found textures as Blender materials
-
-The `.geo` files do not seem to store full texture paths directly, so the importer does its best by looking for related `.tex`, `.tdt`, and converted `.png` files near the model you import.
+- Imports `.geo` files
+- Imports `.skn` files
+- Imports `.trl` files
 
 ### Installing the Blender Add-on
 
@@ -65,7 +58,7 @@ The `.geo` files do not seem to store full texture paths directly, so the import
 
 - Python 3
 - `PySide6`
-- `python-lzo`
+- `dissect.util`
 - `Pillow`
 - `numpy`
 
