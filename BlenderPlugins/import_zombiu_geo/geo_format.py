@@ -72,6 +72,18 @@ class MeshPart:
     face_normals: List[Tuple[int, int, int]] | None = None
 
 
+@dataclass
+class SkinWeightEntry:
+    vertex_index: int
+    weight: float
+
+
+@dataclass
+class SkinWeightList:
+    bone_hash: int
+    source_offset: int
+    entries: List[SkinWeightEntry]
+
 
 def _u16(data: bytes, offset: int) -> int:
     return struct.unpack_from("<H", data, offset)[0]
@@ -79,6 +91,10 @@ def _u16(data: bytes, offset: int) -> int:
 
 def _u32(data: bytes, offset: int) -> int:
     return struct.unpack_from("<I", data, offset)[0]
+
+
+def _f32(data: bytes, offset: int) -> float:
+    return struct.unpack_from("<f", data, offset)[0]
 
 
 def _f32x3(data: bytes, offset: int) -> Tuple[float, float, float]:
@@ -168,6 +184,91 @@ def read_primary_uvs(data: bytes, header: GeoHeader, flip_v: bool) -> List[Tuple
 def read_normals(data: bytes, header: GeoHeader) -> List[Tuple[float, float, float]]:
     normal_offset, _, _, _, _, _ = attribute_offsets(header)
     return read_vectors(data, normal_offset, header.normal_count)
+
+
+def _is_sane_weight(value: float) -> bool:
+    return value == value and -0.001 <= value <= 1.001
+
+
+def _parse_skin_weight_table_at(
+    data: bytes,
+    header: GeoHeader,
+    offset: int,
+    known_hashes: set[int],
+) -> tuple[List[SkinWeightList], int] | None:
+    if offset + 8 > len(data):
+        return None
+
+    list_count = _u16(data, offset)
+    if list_count <= 0 or list_count > min(len(known_hashes), 512):
+        return None
+
+    cursor = offset + 2
+    seen_hashes: set[int] = set()
+    lists: List[SkinWeightList] = []
+    total_entries = 0
+
+    for _ in range(list_count):
+        if cursor + 6 > len(data):
+            return None
+        bone_hash = _u32(data, cursor)
+        entry_count = _u16(data, cursor + 4)
+        source_offset = cursor
+        cursor += 6
+
+        if bone_hash not in known_hashes or bone_hash in seen_hashes:
+            return None
+        if entry_count > header.position_count:
+            return None
+
+        entries: List[SkinWeightEntry] = []
+        for _entry_index in range(entry_count):
+            if cursor + 6 > len(data):
+                return None
+            weight = _f32(data, cursor)
+            vertex_index = _u16(data, cursor + 4)
+            cursor += 6
+
+            if vertex_index >= header.position_count or not _is_sane_weight(weight):
+                return None
+            entries.append(SkinWeightEntry(vertex_index=vertex_index, weight=max(0.0, min(1.0, weight))))
+
+        seen_hashes.add(bone_hash)
+        total_entries += entry_count
+        lists.append(SkinWeightList(bone_hash=bone_hash, source_offset=source_offset, entries=entries))
+
+    return lists, total_entries
+
+
+def parse_skin_weight_lists(
+    data: bytes,
+    header: GeoHeader,
+    bone_hashes: Sequence[int],
+) -> List[SkinWeightList]:
+    known_hashes = set(bone_hashes)
+    if not known_hashes:
+        return []
+
+    _, _, _, _, _, secondary_uv_offset = attribute_offsets(header)
+    scan_start = min(len(data), secondary_uv_offset + header.secondary_uv_count * 8)
+    best_score: tuple[int, int, int] | None = None
+    best_lists: List[SkinWeightList] = []
+
+    for offset in range(scan_start, max(scan_start, len(data) - 8)):
+        if _u32(data, offset + 2) not in known_hashes:
+            continue
+
+        parsed = _parse_skin_weight_table_at(data, header, offset, known_hashes)
+        if parsed is None:
+            continue
+
+        lists, total_entries = parsed
+        score = (len(lists), total_entries, -offset)
+        if best_score is None or score > best_score:
+            best_score = score
+            best_lists = lists
+
+    return best_lists
 
 
 def triangle_area(points: Sequence[Tuple[float, float, float]], tri: Tuple[int, int, int]) -> float:
@@ -817,4 +918,3 @@ def parse_mesh_parts(
 
     faces, runs = decode_faces(data, header, points, False)
     return [MeshPart(name="mesh", faces=faces, run=runs[0])]
-

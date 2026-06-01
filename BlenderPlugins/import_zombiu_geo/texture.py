@@ -19,15 +19,15 @@ TEXTURE_MIN_SCORE = 0.62
 TEXTURE_GENERIC_KEYS = {"body", "head", "hair", "eye", "eyes"}
 TEXTURE_TOKEN_STOPWORDS = {
     "ch", "gen", "com", "skin", "misc", "drt", "lod", "pc", "h", "ca",
-    "af", "as", "z", "reg", "med", "00", "01", "0", "1", "2", "3", "4", "5",
+    "af", "as", "z", "reg", "med", "m", "f", "t", "w", "weapon", "material",
+    "00", "01", "02", "03", "04", "05", "06", "07", "08", "09",
+    "0", "1", "2", "3", "4", "5",
 }
 TEXTURE_TOKEN_ALIASES = {
     "nrs": "nurse",
     "trd": "trader",
     "lo": "low",
     "up": "upper",
-    "m": "male",
-    "f": "female",
     "suit": "uniform",
     "pants": "pant",
     "eyes": "eye",
@@ -179,9 +179,10 @@ def texture_cache_dir(geo_path: str) -> str:
 
 # exact geo material keys win; name scoring only fills gaps.
 class TextureResolver:
-    def __init__(self, geo_path: str, convert_tdt: bool):
+    def __init__(self, geo_path: str, convert_tdt: bool, alpha_mode: str = "opaque"):
         self.geo_path = geo_path
         self.convert_tdt = convert_tdt
+        self.alpha_mode = alpha_mode
         self.cache_dir = texture_cache_dir(geo_path)
         self.groups: dict[str, TextureGroup] = {}
         self.materials: dict[str, bpy.types.Material] = {}
@@ -281,9 +282,11 @@ class TextureResolver:
 
         material = bpy.data.materials.new(resolved.group.key)
         material.use_nodes = True
+        material.blend_method = "OPAQUE"
         material["geo_texture_key"] = resolved.material_key
         material["geo_texture_match"] = resolved.method
         material["geo_texture_score"] = resolved.score
+        material["geo_texture_alpha_mode"] = self.alpha_mode
 
         nodes = material.node_tree.nodes
         links = material.node_tree.links
@@ -303,11 +306,20 @@ class TextureResolver:
                 links.new(tex_node.outputs["Color"], base_color_input)
                 alpha_output = tex_node.outputs.get("Alpha")
                 alpha_input = bsdf.inputs.get("Alpha")
-                if alpha_output and alpha_input and color_asset.role in {"DA", "ENCA"}:
+                if (
+                    self.alpha_mode != "opaque"
+                    and alpha_output
+                    and alpha_input
+                    and color_asset.role in {"DA", "ENCA"}
+                ):
                     links.new(alpha_output, alpha_input)
-                    material.blend_method = "BLEND"
-                    if hasattr(material, "use_screen_refraction"):
-                        material.use_screen_refraction = True
+                    if self.alpha_mode == "clip":
+                        material.blend_method = "CLIP"
+                        material.alpha_threshold = 0.5
+                    elif self.alpha_mode == "blend":
+                        material.blend_method = "BLEND"
+                        if hasattr(material, "show_transparent_back"):
+                            material.show_transparent_back = False
 
         normal_asset = self.best_usable_asset(resolved.group, TEXTURE_NORMAL_ROLES)
         if normal_asset:
