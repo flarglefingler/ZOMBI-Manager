@@ -1,14 +1,9 @@
 from dataclasses import dataclass
-from utilities import binaryHelpers
+from utilities import binaryHelpers, lzo_backend
 from typing import List, Optional
 from PySide6.QtWidgets import (
     QApplication, QProgressDialog
 )
-
-try: 
-    import lzo 
-except Exception: 
-    lzo = None
 
 # ----------------- Data classes -----------------
 @dataclass
@@ -25,10 +20,7 @@ class BFZArchive:
         self.memory: Optional[bytearray] = None
 
     def _ensure_lzo(self):
-        if lzo is None:
-            raise RuntimeError(
-                "Please install python-lzo to parse BFZ files"
-            )
+        lzo_backend.require_backend()
 
     def parse(self, progress: Optional[QProgressDialog] = None):
         self._ensure_lzo()
@@ -112,7 +104,7 @@ class BFZArchive:
                 comp = f.read(ZSIZE)
                 f.seek(cur)
 
-                decomp = lzo.decompress(comp, False, SIZE)
+                decomp = lzo_backend.decompress(comp, SIZE)
                 if len(decomp) != SIZE:
                     raise RuntimeError(f"Chunk {i} decompressed size mismatch")
 
