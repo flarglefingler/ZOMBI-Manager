@@ -130,11 +130,10 @@ def parse_mat_file(path: str) -> MatDescriptor:
 
 
 def mat_key_to_mta_stem_map(mat_paths: Iterable[str], mta_paths: Iterable[str]) -> dict[int, str]:
-    """Map old MAT sub-material keys to MTA names by archive order.
-
-    LyN keeps MAT keys as the old material resource ids, but exported BFZ
-    manifests use archive table keys. In observed world archives, the first
-    appearance order of unique MAT keys matches the MTA file order.
+    """
+    TODO: Clean this up. 
+    This function specifically was helped with AI, it works but I feel like it could be better.
+    (Only use of AI in this project besides the horrible ass README)
     """
 
     material_keys = []
