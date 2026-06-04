@@ -1,5 +1,3 @@
-"""parsing for observed zombiu/lyn skn skeleton files."""
-
 from __future__ import annotations
 
 import os
@@ -300,6 +298,7 @@ def parse_skn(data: bytes, path: str = "") -> SknFile:
     if data[SKN_MAGIC_OFFSET:SKN_MAGIC_OFFSET + 4] != SKN_MAGIC:
         raise ValueError("Missing SKN_ marker.")
 
+    # note: might need to refine this. some files have weirdly different offsets for some fucking reason
     stored_size = _u32(data, 0)
     version = _u32(data, SKN_VERSION_OFFSET)
     bone_count = _u32(data, SKN_BONE_COUNT_OFFSET)
