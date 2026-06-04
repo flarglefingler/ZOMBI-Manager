@@ -43,6 +43,13 @@ Current features:
 - Imports `.skn` files
 - Imports `.trl` files
 
+### Installing the manager
+1. Download Python (look it up)
+2. Install requirements from the requirements.txt
+3. Download the source code
+4. Run the 'zombiManager.py'
+5. Enjoy
+
 ### Installing the Blender Add-on
 
 1. Open Blender
