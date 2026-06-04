@@ -1,5 +1,3 @@
-"""tdt parser and png conversion"""
-
 from __future__ import annotations
 
 import binascii
@@ -42,6 +40,8 @@ TEXTURE_FORMATS = {
     0x00: TextureFormat(0x00, "RGBA8", None, 4, "rgba8"),
     0x09: TextureFormat(0x09, "BC1/DXT1", 8, None, "bc1"),
     0x0B: TextureFormat(0x0B, "BC3/DXT5", 16, None, "bc3"),
+    0x13: TextureFormat(0x13, "L16/AO", None, 2, "l16ao"),
+    0x1F: TextureFormat(0x1F, "BC4/ATI1", 8, None, "bc4"),
     0x20: TextureFormat(0x20, "BC5/ATI2", 16, None, "bc5"),
 }
 
@@ -81,7 +81,7 @@ def parse_tdt_texture_data(data: bytes, path: str = "<memory>") -> TdtTexture:
     while True:
         data_size = texture_level_data_size(fmt, level_width, level_height)
         if offset + data_size > len(data):
-            raise ValueError(f"TDT mip payload overruns file at 0x{offset:x}.")
+            raise ValueError(f"TDT mip overruns file at 0x{offset:x}.")
         levels.append(TdtMipLevel(level_width, level_height, offset, data_size))
         offset += data_size
         if offset == len(data):
@@ -169,7 +169,7 @@ def decode_block_texture(width: int, height: int, payload: bytes, decoder: str) 
     rgba = bytearray(width * height * 4)
     block_width = max(1, (width + 3) // 4)
     block_height = max(1, (height + 3) // 4)
-    stride = 8 if decoder == "bc1" else 16
+    stride = 8 if decoder in {"bc1", "bc4"} else 16
     offset = 0
 
     for by in range(block_height):
@@ -182,6 +182,9 @@ def decode_block_texture(width: int, height: int, payload: bytes, decoder: str) 
                 alpha = decode_bc_alpha_block(block[:8])
                 colors = decode_bc1_color_block(block[8:16], force_four_color=True)
                 pixels = [(r, g, b, alpha[index]) for index, (r, g, b, _a) in enumerate(colors)]
+            elif decoder == "bc4":
+                red = decode_bc_alpha_block(block)
+                pixels = [(value, value, value, 255) for value in red]
             elif decoder == "bc5":
                 red = decode_bc_alpha_block(block[:8])
                 green = decode_bc_alpha_block(block[8:16])
@@ -208,6 +211,15 @@ def decode_block_texture(width: int, height: int, payload: bytes, decoder: str) 
     return bytes(rgba)
 
 
+def decode_l16ao_texture(width: int, height: int, payload: bytes) -> bytes:
+    rgba = bytearray(width * height * 4)
+    for index in range(width * height):
+        value = payload[index * 2 + 1]
+        dst = index * 4
+        rgba[dst:dst + 4] = bytes((value, value, value, 255))
+    return bytes(rgba)
+
+
 def decode_tdt_top_mip_rgba_data(data: bytes, info: TdtTexture | None = None) -> Tuple[int, int, bytes]:
     info = info or parse_tdt_texture_data(data)
     fmt = _texture_format(info.format_code)
@@ -216,7 +228,9 @@ def decode_tdt_top_mip_rgba_data(data: bytes, info: TdtTexture | None = None) ->
 
     if fmt.decoder == "rgba8":
         return info.width, info.height, payload
-    if fmt.decoder in {"bc1", "bc3", "bc5"}:
+    if fmt.decoder == "l16ao":
+        return info.width, info.height, decode_l16ao_texture(info.width, info.height, payload)
+    if fmt.decoder in {"bc1", "bc3", "bc4", "bc5"}:
         return info.width, info.height, decode_block_texture(info.width, info.height, payload, fmt.decoder)
     raise ValueError(f"Unsupported TDT PNG decoder {fmt.name}.")
 

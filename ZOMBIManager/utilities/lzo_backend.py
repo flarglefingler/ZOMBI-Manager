@@ -1,9 +1,5 @@
-"""lzo decompression backend used by bfz archives."""
-
 from __future__ import annotations
-
 from typing import Callable
-
 
 _decompress: Callable[[bytes, int], bytes] | None = None
 backend_name = ""
@@ -22,7 +18,7 @@ except Exception as exc:
 
 if _decompress is None:
     try:
-        import lzo as _python_lzo
+        import lzo as _python_lzo #fallback incase we aint have no dissect util
 
         def _decompress_with_python_lzo(data: bytes, expected_size: int) -> bytes:
             return _python_lzo.decompress(data, False, expected_size)
@@ -43,7 +39,7 @@ def require_backend() -> None:
             "No LZO backend is installed. Install dependencies with:\n"
             "python -m pip install PySide6 dissect.util Pillow numpy\n\n"
             "The old python-lzo package is still supported as a fallback, "
-            "but dissect.util is recommended because it has Windows wheels."
+            "but dissect.util is recommended because it works 4 windows."
         )
 
 

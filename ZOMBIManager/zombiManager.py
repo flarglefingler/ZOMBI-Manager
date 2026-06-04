@@ -4,9 +4,10 @@ import os
 import sys
 import tempfile
 import traceback
+import json
 from typing import Dict, Optional
 
-from PySide6.QtCore import Qt, QSize, QUrl, QPointF, QObject, QRunnable, QThreadPool, Signal
+from PySide6.QtCore import Qt, QSize, QUrl, QPointF, QObject, QRunnable, QThreadPool, Signal, QTimer
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -22,7 +23,10 @@ from PySide6.QtGui import (
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -45,12 +49,26 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from utilities import bfz, geo_format, oli, previewers, skn_format, tdt, trl_format
+from utilities import (
+    bfz,
+    geo_format,
+    material_format,
+    mdf_format,
+    obj_format,
+    oli,
+    previewers,
+    skn_format,
+    tdt,
+    trl_format,
+    wor_format,
+)
 
 
 MAX_PREVIEW_FACES = 3500
 MAX_DRAG_PREVIEW_FACES = 1400
 MAX_PREVIEW_CACHE_ITEMS = 8
+SIDECAR_PREVIEW_EXTS = (".vii", ".mtn", ".mat", ".mta", ".tex")
+SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "zombi_manager_settings.json")
 
 
 def bytes_preview(data: bytes, n: int = 384) -> str:
@@ -64,6 +82,20 @@ def file_kind(name: str) -> str:
     lower = name.lower()
     if lower.endswith(".geo"):
         return "3D model"
+    if lower.endswith(".obj"):
+        return "Game Object"
+    if lower.endswith(".vii"):
+        return "Visual Instance" # this is a guess
+    if lower.endswith(".mtn"):
+        return "Motion Setup" # also a guess
+    if lower.endswith(".mat"):
+        return "Material"
+    if lower.endswith(".mta"):
+        return "Texture Material"
+    if lower.endswith(".mdf"):
+        return "Modifier Data"
+    if lower.endswith(".wor"):
+        return "World"
     if lower.endswith(".tdt"):
         return "Texture"
     if lower.endswith(".skn"):
@@ -73,7 +105,7 @@ def file_kind(name: str) -> str:
     if lower.endswith(".oli"):
         return "Localization"
     if lower.endswith(".tex"):
-        return "Texture metadata"
+        return "Texture Descriptor"
     if lower.endswith(".son"):
         return "Audio"
     ext = os.path.splitext(name)[1].lower()
@@ -85,6 +117,57 @@ def converted_stem(name: str) -> str:
     if base.lower().endswith(".pc.tdt"):
         return base[:-7]
     return os.path.splitext(base)[0]
+
+
+def entry_key_text(entry: bfz.BFZFileEntry) -> str:
+    return bfz.BFZArchive.key_hex(entry.key) if entry.key else ""
+
+
+def load_app_settings() -> dict:
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+
+
+def save_app_settings(settings: dict) -> None:
+    with open(SETTINGS_PATH, "w", encoding="utf-8") as handle:
+        json.dump(settings, handle, indent=2)
+        handle.write("\n")
+
+
+def game_data_dir(game_dir: str) -> Optional[str]:
+    if not game_dir:
+        return None
+    path = os.path.abspath(os.path.expanduser(game_dir))
+    if os.path.basename(path).lower() == "data" and os.path.isdir(path):
+        return path
+    data_dir = os.path.join(path, "Data")
+    if os.path.isdir(data_dir):
+        return data_dir
+    return None
+
+
+def normalized_game_dir(game_dir: str) -> Optional[str]:
+    data_dir = game_data_dir(game_dir)
+    if not data_dir:
+        return None
+    if os.path.basename(os.path.abspath(game_dir)).lower() == "data":
+        return os.path.dirname(data_dir)
+    return os.path.abspath(os.path.expanduser(game_dir))
+
+
+def format_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024.0 or unit == "GB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024.0
+    return f"{size:,} B"
 
 
 class WorkerSignals(QObject):
@@ -111,6 +194,13 @@ def parse_archive_task(path: str) -> bfz.BFZArchive:
     archive = bfz.BFZArchive(path)
     archive.parse()
     return archive
+
+
+def scan_game_archives_task(game_dir: str):
+    data_dir = game_data_dir(game_dir)
+    if not data_dir:
+        raise ValueError("Could not find a Data folder in that game directory.")
+    return bfz.scan_archives_in_directory(data_dir)
 
 
 def build_geo_preview_task(data: bytes):
@@ -212,6 +302,250 @@ def build_trl_preview_task(name: str, data: bytes):
         f"{len(data):,} bytes"
     )
     return "Animation Track", body, meta
+
+
+def build_wor_preview_task(name: str, data: bytes, key_map: Dict[int, list]):
+    world = wor_format.parse_wor(data, name)
+    resolved_count = sum(1 for ref in world.object_refs if ref.object_key in key_map)
+    metadata_count = sum(1 for ref in world.object_refs if ref.has_metadata)
+
+    lines = ["World object refs", ""]
+    lines.extend(wor_format.refs_to_lines(world.object_refs, key_map, limit=350))
+    if not world.object_refs:
+        lines.append("(no object refs decoded)")
+
+    meta = (
+        f"World\n"
+        f"version {world.version}\n"
+        f"{world.object_count:,} object ref(s)\n"
+        f"{resolved_count:,} resolved by archive key\n"
+        f"{metadata_count:,} ref(s) with metadata\n"
+        f"world chunk 0x{world.world_chunk_size:x} bytes\n"
+        f"object group 0x{world.object_group_size:x} bytes\n"
+        f"{world.stored_size:,} bytes"
+    )
+    return "World", "\n".join(lines), meta
+
+
+def _archive_key_matches(key_map: Dict[int, list], key: int) -> list[tuple[str, int, list]]:
+    matches = []
+    seen = set()
+    for label, value in (
+        ("exact", key & 0xFFFFFFFF),
+        ("stored + 1", (key + 1) & 0xFFFFFFFF),
+        ("stored - 1", (key - 1) & 0xFFFFFFFF),
+    ):
+        paths = key_map.get(value)
+        if not paths or value in seen:
+            continue
+        seen.add(value)
+        matches.append((label, value, paths))
+    return matches
+
+
+def _format_key_line(key_map: Dict[int, list], key: int, limit_paths: int = 3) -> str:
+    matches = _archive_key_matches(key_map, key)
+    if not matches:
+        return f"{key & 0xffffffff:08X}"
+
+    bits = []
+    for label, value, paths in matches:
+        shown = ", ".join(os.path.basename(path) for path in paths[:limit_paths])
+        if len(paths) > limit_paths:
+            shown += f", +{len(paths) - limit_paths} more"
+        prefix = f"{value & 0xffffffff:08X}" if label != "exact" else ""
+        bits.append(f"{label}: {prefix + ' -> ' if prefix else ''}{shown}")
+    return f"{key & 0xffffffff:08X} ({'; '.join(bits)})"
+
+
+def _key_lines(title: str, keys, key_map: Dict[int, list], limit: int = 120) -> list[str]:
+    keys = list(keys)
+    lines = [title, ""]
+    if not keys:
+        lines.append("- none decoded")
+        return lines
+    for key in keys[:limit]:
+        lines.append(f"- {_format_key_line(key_map, key)}")
+    if len(keys) > limit:
+        lines.append(f"... {len(keys) - limit:,} more")
+    return lines
+
+
+def _texture_ref_line(key_map: Dict[int, list], texture_ref_map: Dict[int, list], key: int) -> str:
+    bits = []
+    texture_paths = texture_ref_map.get(key & 0xFFFFFFFF)
+    if texture_paths:
+        shown = ", ".join(os.path.basename(path) for path in texture_paths[:3])
+        if len(texture_paths) > 3:
+            shown += f", +{len(texture_paths) - 3} more"
+        bits.append(f"texture: {shown}")
+
+    archive_matches = _archive_key_matches(key_map, key)
+    if archive_matches:
+        match_text = _format_key_line(key_map, key)
+        if "(" in match_text:
+            bits.append(match_text.split("(", 1)[1].rstrip(")"))
+
+    if not bits:
+        return f"{key & 0xffffffff:08X}"
+    return f"{key & 0xffffffff:08X} ({'; '.join(bits)})"
+
+
+def _texture_ref_lines(
+    title: str,
+    keys,
+    key_map: Dict[int, list],
+    texture_ref_map: Dict[int, list],
+    limit: int = 80,
+) -> list[str]:
+    keys = list(keys)
+    lines = [title, ""]
+    if not keys:
+        lines.append("- none decoded")
+        return lines
+    for key in keys[:limit]:
+        lines.append(f"- {_texture_ref_line(key_map, texture_ref_map, key)}")
+    if len(keys) > limit:
+        lines.append(f"... {len(keys) - limit:,} more")
+    return lines
+
+
+def build_obj_preview_task(name: str, data: bytes, key_map: Dict[int, list]):
+    obj = obj_format.parse_obj(data, name)
+    matrix_lines = []
+    for matrix in obj.matrices:
+        matrix_lines.append(f"- matrix at 0x{matrix.offset:x}")
+    translation = obj.translation
+    if obj.translation_offset >= 0:
+        matrix_lines.append(
+            f"- active translation at 0x{obj.translation_offset:x}: "
+            f"({translation[0]:.3f}, {translation[1]:.3f}, {translation[2]:.3f})"
+        )
+    body_lines = ["Game object summary", "", "Matrices", "", *matrix_lines, ""]
+    body_lines.extend(_key_lines("Resource keys", obj.resource_keys, key_map))
+    meta = (
+        "Game Object\n"
+        f"version {obj.version}\n"
+        f"{len(obj.matrices):,} matrix/matrices\n"
+        f"{len(obj.resource_keys):,} possible resource key(s)\n"
+        f"{len(data):,} bytes"
+    )
+    return "Game Object", "\n".join(body_lines), meta
+
+
+def build_sidecar_preview_task(name: str, data: bytes, key_map: Dict[int, list], texture_ref_map: Optional[Dict[int, list]] = None):
+    texture_ref_map = texture_ref_map or {}
+    lower = name.lower()
+    if lower.endswith((".vii", ".mtn")):
+        sidecar = obj_format.parse_sidecar(data, name)
+        label = "Visual Instance" if sidecar.kind == "VIS" else "Motion Setup"
+        body_lines = [f"{label} summary", ""]
+        body_lines.extend(_key_lines("Resource keys", sidecar.resource_keys, key_map))
+        meta = (
+            f"{label}\n"
+            f"{sidecar.kind}\n"
+            f"{len(sidecar.resource_keys):,} possible resource key(s)\n"
+            f"{len(data):,} bytes"
+        )
+        return label, "\n".join(body_lines), meta
+
+    if lower.endswith(".mat"):
+        mat = material_format.parse_mat(data, name)
+        body_lines = ["Material summary", ""]
+        body_lines.extend(_key_lines("Sub-material keys", mat.submaterial_keys, key_map))
+        meta = (
+            "Material\n"
+            f"{len(mat.submaterial_keys):,} sub-material key(s)\n"
+            f"{len(data):,} bytes"
+        )
+        return "Material", "\n".join(body_lines), meta
+
+    if lower.endswith(".mta"):
+        mta = material_format.parse_mta(data, name)
+        matched_refs = [
+            ref for ref in mta.texture_refs
+            if texture_ref_map.get(ref & 0xFFFFFFFF) or _archive_key_matches(key_map, ref)
+        ]
+        body_lines = [
+            "Texture material summary",
+            "",
+            f"Shader: {mta.shader_name or 'unknown'}",
+            f"Layer count: {mta.layer_count}",
+            "",
+        ]
+        if mta.texture_slots:
+            body_lines.append("Texture slot records")
+            body_lines.append("")
+            for slot in mta.texture_slots:
+                transform = ", ".join(f"{value:.4g}" for value in slot.transform)
+                body_lines.append(
+                    f"- slot {slot.index} @ 0x{slot.offset:x}: "
+                    f"{_texture_ref_line(key_map, texture_ref_map, slot.texture_ref)} "
+                    f"transform[{transform}] flags=0x{slot.flags:08X}"
+                )
+        else:
+            body_lines.extend(_texture_ref_lines("Texture slot records", (), key_map, texture_ref_map))
+        body_lines.append("")
+        extra_matches = [
+            ref for ref in mta.extra_texture_refs
+            if texture_ref_map.get(ref & 0xFFFFFFFF) or _archive_key_matches(key_map, ref)
+        ]
+        body_lines.extend(_texture_ref_lines("Extra decoded texture refs", extra_matches, key_map, texture_ref_map))
+        meta = (
+            "Texture Material\n"
+            f"{mta.shader_name or 'unknown shader'}\n"
+            f"{mta.layer_count:,} layer(s)\n"
+            f"{len(mta.texture_slots):,} texture slot record(s)\n"
+            f"{len(mta.extra_texture_refs):,} loose ref word(s)\n"
+            f"{len(matched_refs):,} matched texture ref(s)\n"
+            f"{len(data):,} bytes"
+        )
+        return "Texture Material", "\n".join(body_lines), meta
+
+    if lower.endswith(".tex"):
+        tex = material_format.parse_tex(data, name)
+        body_lines = ["Texture descriptor summary", ""]
+        if tex.width and tex.height:
+            body_lines.append(f"- size: {tex.width} x {tex.height}")
+        if tex.format_code is not None:
+            body_lines.append(f"- format: {tex.format_name} (0x{tex.format_code:02X})")
+        if tex.file_key is None:
+            body_lines.append("- payload/resource key: not decoded")
+            key_text = "none"
+        else:
+            body_lines.append("- payload/resource key: " + _format_key_line(key_map, tex.file_key))
+            key_text = f"{tex.file_key & 0xffffffff:08X}"
+        meta = (
+            "Texture Descriptor\n"
+            f"payload/resource key: {key_text}\n"
+            f"{tex.format_name or 'unknown format'}\n"
+            f"{tex.width or '?'} x {tex.height or '?'}\n"
+            f"{len(data):,} bytes"
+        )
+        return "Texture Descriptor", "\n".join(body_lines), meta
+
+    raise ValueError("unsupported sidecar")
+
+
+def build_mdf_preview_task(name: str, data: bytes, key_map: Dict[int, list]):
+    mdf = mdf_format.parse_mdf(data, name)
+    lines = ["Modifier data summary", ""]
+    if not mdf.modifier_links:
+        lines.append("- no modifier links decoded")
+    for link in mdf.modifier_links:
+        order = f", order {link.order}" if link.order else ""
+        lines.append(
+            f"- [{link.index:03d}] {_format_key_line(key_map, link.resource_key)} "
+            f"-> {link.type_name} ({link.modifier_type}) flags=0x{link.flags:08X}{order}"
+        )
+    meta = (
+        "Modifier Data\n"
+        f"version {mdf.version}\n"
+        f"{mdf.link_count:,} modifier link(s)\n"
+        f"link bytes 0x{mdf.links_size:x}\n"
+        f"{len(data):,} bytes"
+    )
+    return "Modifier Data", "\n".join(lines), meta
 
 
 def build_oli_preview_task(name: str, data: bytes):
@@ -537,6 +871,43 @@ class PreviewPane(QWidget):
                 self.set_text(os.path.basename(name), "GEO preview failed", bytes_preview(data), str(exc))
                 return
 
+        if lower.endswith(".wor"):
+            try:
+                subtitle, body, meta = build_wor_preview_task(name, data, {})
+                self.set_text(os.path.basename(name), subtitle, body, meta)
+                return
+            except Exception as exc:
+                self.set_text(os.path.basename(name), "WOR preview failed", bytes_preview(data), str(exc))
+                return
+
+        if lower.endswith(".obj"):
+            try:
+                subtitle, body, meta = build_obj_preview_task(name, data, {})
+                self.set_text(os.path.basename(name), subtitle, body, meta)
+                return
+            except Exception as exc:
+                self.set_text(os.path.basename(name), "OBJ preview failed", bytes_preview(data), str(exc))
+                return
+            
+        # TODO: come up with better name for sidecar it sounds too stupid
+        if lower.endswith(SIDECAR_PREVIEW_EXTS):
+            try:
+                subtitle, body, meta = build_sidecar_preview_task(name, data, {})
+                self.set_text(os.path.basename(name), subtitle, body, meta)
+                return
+            except Exception as exc:
+                self.set_text(os.path.basename(name), "Sidecar preview failed", bytes_preview(data), str(exc))
+                return
+
+        if lower.endswith(".mdf"):
+            try:
+                subtitle, body, meta = build_mdf_preview_task(name, data, {})
+                self.set_text(os.path.basename(name), subtitle, body, meta)
+                return
+            except Exception as exc:
+                self.set_text(os.path.basename(name), "MDF preview failed", bytes_preview(data), str(exc))
+                return
+
         if lower.endswith(".tdt"):
             try:
                 info = tdt.parse_tdt_texture_data(data, name)
@@ -610,6 +981,66 @@ class PreviewPane(QWidget):
         self.set_text(os.path.basename(name), kind, bytes_preview(data), f"{len(data):,} bytes")
 
 
+class GameDirectoryDialog(QDialog):
+    def __init__(self, current_path: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select ZOMBI Game Folder")
+        self.setMinimumWidth(620)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("Game directory")
+        title.setObjectName("PanelTitle")
+        hint = QLabel("Choose the folder that contains the game's Data folder. Picking Data itself also works.")
+        hint.setObjectName("PanelSubtitle")
+        hint.setWordWrap(True)
+
+        self.path_edit = QLineEdit(current_path)
+        self.path_edit.setPlaceholderText("/path/to/ZOMBI")
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(self.browse)
+
+        row = QHBoxLayout()
+        row.addWidget(self.path_edit, 1)
+        row.addWidget(browse_btn)
+
+        form = QFormLayout()
+        form.addRow("Folder", row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout.addWidget(title)
+        layout.addWidget(hint)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def browse(self):
+        start = self.path_edit.text().strip() or os.path.expanduser("~")
+        path = QFileDialog.getExistingDirectory(self, "Select ZOMBI game folder", start)
+        if path:
+            self.path_edit.setText(path)
+
+    def selected_game_dir(self) -> str:
+        return self.path_edit.text().strip()
+
+    def accept(self):
+        normalized = normalized_game_dir(self.selected_game_dir())
+        if not normalized:
+            QMessageBox.warning(
+                self,
+                "Invalid folder",
+                "That folder does not contain a Data directory with the game's archives.",
+            )
+            return
+        self.path_edit.setText(normalized)
+        super().accept()
+
+
+# TODO: clean this part up, its fuckin' huge
 class ZombiManager(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -618,11 +1049,17 @@ class ZombiManager(QMainWindow):
         self._apply_theme()
         self.archive: Optional[bfz.BFZArchive] = None
         self.current_archive_path: Optional[str] = None
+        self.settings = load_app_settings()
+        self.game_dir: Optional[str] = normalized_game_dir(self.settings.get("game_dir", ""))
+        self.archive_infos: list[bfz.BFZArchiveInfo] = []
         self.thread_pool = QThreadPool.globalInstance()
         self.active_workers = set()
+        self.scan_token = 0
         self.archive_token = 0
         self.preview_token = 0
         self.preview_cache = {}
+        self.texture_ref_cache_path: Optional[str] = None
+        self.texture_ref_cache: Dict[int, list] = {}
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -630,31 +1067,29 @@ class ZombiManager(QMainWindow):
         root_layout.setContentsMargins(12, 12, 12, 12)
         root_layout.setSpacing(10)
 
-        toolbar = QHBoxLayout()
-        self.open_btn = QPushButton("Open BFZ")
-        self.open_btn.clicked.connect(self.on_open)
-        self.export_all_btn = QPushButton("Export Archive")
-        self.export_all_btn.setEnabled(False)
-        self.export_all_btn.clicked.connect(self.export_all)
-        self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("filter files...")
-        self.search_box.textChanged.connect(self.apply_filter)
-        toolbar.addWidget(self.open_btn)
-        toolbar.addWidget(self.export_all_btn)
-        toolbar.addStretch(1)
-        toolbar.addWidget(self.search_box, 2)
-        root_layout.addLayout(toolbar)
+        header = QHBoxLayout()
+        self.game_path_label = QLabel("Game folder: not set")
+        self.game_path_label.setObjectName("PanelSubtitle")
+        self.change_game_btn = QPushButton("Game Folder")
+        self.change_game_btn.clicked.connect(self.choose_game_directory)
+        self.rescan_btn = QPushButton("Scan")
+        self.rescan_btn.clicked.connect(self.scan_game_archives)
+        header.addWidget(self.game_path_label, 1)
+        header.addWidget(self.change_game_btn)
+        header.addWidget(self.rescan_btn)
+        root_layout.addLayout(header)
 
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(self._make_browser_panel())
-        self.preview = PreviewPane()
-        splitter.addWidget(self.preview)
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 5)
-        root_layout.addWidget(splitter, 1)
+        self.main_stack = QStackedWidget()
+        self.library_panel = self._make_library_panel()
+        self.archive_panel = self._make_archive_panel()
+        self.main_stack.addWidget(self.library_panel)
+        self.main_stack.addWidget(self.archive_panel)
+        root_layout.addWidget(self.main_stack, 1)
 
         self.setMenuBar(self._make_menu())
         self.setStatusBar(QStatusBar())
+        self.update_game_path_label()
+        QTimer.singleShot(0, self.startup_game_scan)
 
     def _apply_theme(self):
         palette = self.palette()
@@ -704,31 +1139,109 @@ class ZombiManager(QMainWindow):
             }
         """)
 
+    def _make_library_panel(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("Panel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        title = QLabel("Game Archives")
+        title.setObjectName("PanelTitle")
+        self.library_subtitle = QLabel("choose a game folder to scan archives")
+        self.library_subtitle.setObjectName("PanelSubtitle")
+
+        self.library_search_box = QLineEdit()
+        self.library_search_box.setPlaceholderText("filter archives...")
+        self.library_search_box.textChanged.connect(self.apply_library_filter)
+
+        self.open_btn = QPushButton("Open BFZ...")
+        self.open_btn.clicked.connect(self.on_open)
+
+        search_row = QHBoxLayout()
+        search_row.addWidget(self.library_search_box, 1)
+        search_row.addWidget(self.open_btn)
+
+        self.library_tree = QTreeWidget()
+        self.library_tree.setColumnCount(7)
+        self.library_tree.setHeaderLabels(["Name", "BFZ", "Files", "World", "GEO", "Textures", "Size"])
+        self.library_tree.setSortingEnabled(True)
+        self.library_tree.setAlternatingRowColors(True)
+        self.library_tree.setSelectionMode(QTreeWidget.SingleSelection)
+        self.library_tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        for column in range(1, 7):
+            self.library_tree.header().setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        self.library_tree.itemClicked.connect(self.on_archive_info_clicked)
+
+        layout.addWidget(title)
+        layout.addWidget(self.library_subtitle)
+        layout.addLayout(search_row)
+        layout.addWidget(self.library_tree, 1)
+        return panel
+
+    def _make_archive_panel(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        self.back_to_archives_btn = QPushButton("Archives")
+        self.back_to_archives_btn.clicked.connect(self.show_archive_library)
+        self.archive_title = QLabel("No archive loaded")
+        self.archive_title.setObjectName("PanelTitle")
+        self.archive_title.setWordWrap(True)
+        self.export_all_btn = QPushButton("Export Archive")
+        self.export_all_btn.setEnabled(False)
+        self.export_all_btn.clicked.connect(self.export_all)
+        header.addWidget(self.back_to_archives_btn)
+        header.addWidget(self.archive_title, 1)
+        header.addWidget(self.export_all_btn)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(self._make_browser_panel())
+        self.preview = PreviewPane()
+        splitter.addWidget(self.preview)
+        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(1, 6)
+        splitter.setSizes([430, 740])
+
+        layout.addLayout(header)
+        layout.addWidget(splitter, 1)
+        return panel
+
     def _make_browser_panel(self) -> QWidget:
         panel = QFrame()
         panel.setObjectName("Panel")
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
         title = QLabel("Archive Contents")
         title.setObjectName("PanelTitle")
         self.browser_subtitle = QLabel("no archive loaded")
         self.browser_subtitle.setObjectName("PanelSubtitle")
 
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("filter files...")
+        self.search_box.textChanged.connect(self.apply_filter)
+
         self.tree = QTreeWidget()
-        self.tree.setColumnCount(3)
-        self.tree.setHeaderLabels(["File", "Size", "Kind"])
+        self.tree.setColumnCount(4)
+        self.tree.setHeaderLabels(["File", "Size", "Kind", "Key"])
         self.tree.setSortingEnabled(True)
         self.tree.setAlternatingRowColors(True)
         self.tree.setSelectionMode(QTreeWidget.SingleSelection)
         self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.tree.header().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.tree.header().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.tree.itemClicked.connect(self.on_item_clicked)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.on_context_menu)
 
         layout.addWidget(title)
         layout.addWidget(self.browser_subtitle)
+        layout.addWidget(self.search_box)
         layout.addWidget(self.tree, 1)
         return panel
 
@@ -740,6 +1253,15 @@ class ZombiManager(QMainWindow):
         act_open.triggered.connect(self.on_open)
         file_menu.addAction(act_open)
 
+        act_game = QAction("Set Game Folder...", self)
+        act_game.triggered.connect(self.choose_game_directory)
+        file_menu.addAction(act_game)
+
+        act_scan = QAction("Scan Game Archives", self)
+        act_scan.triggered.connect(self.scan_game_archives)
+        file_menu.addAction(act_scan)
+
+        file_menu.addSeparator()
         act_import = QAction("Import Folder to BFZ (disabled)", self)
         act_import.setEnabled(False)
         file_menu.addAction(act_import)
@@ -759,6 +1281,160 @@ class ZombiManager(QMainWindow):
         worker.signals.failed.connect(on_failed)
         self.thread_pool.start(worker)
 
+    def update_game_path_label(self):
+        if self.game_dir:
+            display = os.path.basename(os.path.normpath(self.game_dir)) or self.game_dir
+            self.game_path_label.setText(f"Game folder: {display}")
+            self.game_path_label.setToolTip(self.game_dir)
+        else:
+            self.game_path_label.setText("Game folder: not set")
+            self.game_path_label.setToolTip("")
+
+    def show_archive_library(self):
+        self.main_stack.setCurrentWidget(self.library_panel)
+        if self.archive:
+            self.statusBar().showMessage(f"Loaded {os.path.basename(self.archive.path)}")
+        else:
+            self.statusBar().clearMessage()
+
+    def startup_game_scan(self):
+        if self.game_dir and game_data_dir(self.game_dir):
+            self.scan_game_archives()
+            return
+        self.choose_game_directory(startup=True)
+
+    def choose_game_directory(self, startup: bool = False):
+        dialog = GameDirectoryDialog(self.game_dir or self.settings.get("game_dir", ""), self)
+        if dialog.exec() != QDialog.Accepted:
+            if startup and not self.game_dir:
+                self.library_subtitle.setText("no game folder selected")
+            return
+
+        chosen = normalized_game_dir(dialog.selected_game_dir())
+        if not chosen:
+            return
+        self.game_dir = chosen
+        self.settings["game_dir"] = chosen
+        save_app_settings(self.settings)
+        self.update_game_path_label()
+        self.scan_game_archives()
+
+    def scan_game_archives(self):
+        if not self.game_dir or not game_data_dir(self.game_dir):
+            self.choose_game_directory()
+            return
+        self.scan_token += 1
+        token = self.scan_token
+        self.main_stack.setCurrentWidget(self.library_panel)
+        self.library_tree.clear()
+        self.library_subtitle.setText("scanning Data archives...")
+        self.statusBar().showMessage("Scanning game archives...")
+        self.rescan_btn.setEnabled(False)
+        self.start_task(token, scan_game_archives_task, self.on_scan_finished, self.on_scan_failed, self.game_dir)
+
+    def on_scan_finished(self, token: int, archive_infos):
+        if token != self.scan_token:
+            return
+        self.rescan_btn.setEnabled(True)
+        self.archive_infos = list(archive_infos)
+        self.populate_library()
+        self.settings["game_dir"] = self.game_dir
+        self.settings["last_scan_count"] = len(self.archive_infos)
+        save_app_settings(self.settings)
+        self.statusBar().showMessage(f"Scanned {len(self.archive_infos):,} archive(s)")
+
+    def on_scan_failed(self, token: int, error_text: str):
+        if token != self.scan_token:
+            return
+        self.rescan_btn.setEnabled(True)
+        self.library_subtitle.setText("archive scan failed")
+        self.statusBar().clearMessage()
+        QMessageBox.critical(self, "Scan failed", f"Failed to scan game archives:\n\n{error_text}")
+
+    def populate_library(self):
+        self.library_tree.setUpdatesEnabled(False)
+        self.library_tree.setSortingEnabled(False)
+        self.library_tree.clear()
+        try:
+            for info in self.archive_infos:
+                ext = info.extension_counts
+                texture_count = ext.get(".tdt", 0) + ext.get(".tex", 0) + ext.get(".mta", 0)
+                world_count = ext.get(".wor", 0)
+                item = QTreeWidgetItem([
+                    info.display_name,
+                    os.path.basename(info.relative_path),
+                    f"{info.file_count:,}",
+                    f"{world_count:,}" if world_count else "",
+                    f"{ext.get('.geo', 0):,}" if ext.get(".geo", 0) else "",
+                    f"{texture_count:,}" if texture_count else "",
+                    format_bytes(info.archive_size),
+                ])
+                item.setData(0, Qt.UserRole, info.path)
+                item.setToolTip(0, self.archive_info_tooltip(info))
+                item.setToolTip(1, info.relative_path)
+                self.library_tree.addTopLevelItem(item)
+
+            self.library_tree.setSortingEnabled(True)
+            self.library_tree.sortItems(0, Qt.AscendingOrder)
+            self.library_subtitle.setText(f"{len(self.archive_infos):,} archive(s) found")
+            self.apply_library_filter(self.library_search_box.text())
+        finally:
+            self.library_tree.setUpdatesEnabled(True)
+            self.library_tree.setSortingEnabled(True)
+
+    def archive_info_tooltip(self, info: bfz.BFZArchiveInfo) -> str:
+        ext = info.extension_counts
+        top_counts = ", ".join(
+            f"{key} {value:,}"
+            for key, value in sorted(ext.items(), key=lambda item: (-item[1], item[0]))[:8]
+        )
+        worlds = ", ".join(info.world_names[:4])
+        if len(info.world_names) > 4:
+            worlds += f", +{len(info.world_names) - 4} more"
+        return (
+            f"{info.relative_path}\n"
+            f"Name: {info.display_name}\n"
+            f"Files: {info.file_count:,}\n"
+            f"Unique keys: {info.key_count:,}\n"
+            f"Duplicate paths: {info.duplicate_name_count:,}\n"
+            f"Archive size: {format_bytes(info.archive_size)}\n"
+            f"Unpacked size: {format_bytes(info.unpacked_size)}\n"
+            f"Worlds: {worlds or 'none'}\n"
+            f"Types: {top_counts or 'none'}"
+        )
+
+    def archive_info_for_path(self, path: str) -> Optional[bfz.BFZArchiveInfo]:
+        absolute = os.path.abspath(path)
+        return next((info for info in self.archive_infos if os.path.abspath(info.path) == absolute), None)
+
+    def apply_library_filter(self, text: str):
+        query = text.strip().lower()
+        for index in range(self.library_tree.topLevelItemCount()):
+            item = self.library_tree.topLevelItem(index)
+            path = item.data(0, Qt.UserRole) or ""
+            info = next((candidate for candidate in self.archive_infos if candidate.path == path), None)
+            haystack = " ".join(item.text(column).lower() for column in range(item.columnCount()))
+            if info:
+                haystack += " " + info.relative_path.lower() + " " + " ".join(name.lower() for name in info.world_names)
+            item.setHidden(bool(query) and query not in haystack)
+
+    def on_archive_info_clicked(self, item: QTreeWidgetItem, _col: int):
+        path = item.data(0, Qt.UserRole)
+        if path:
+            self.load_archive(path)
+
+    def load_archive(self, path: str):
+        self.archive_token += 1
+        token = self.archive_token
+        self.statusBar().showMessage(f"Loading {os.path.basename(path)}...")
+        self.archive_title.setText(os.path.basename(path))
+        self.browser_subtitle.setText(f"loading {os.path.basename(path)}...")
+        self.export_all_btn.setEnabled(False)
+        self.tree.clear()
+        self.preview.clear()
+        self.main_stack.setCurrentWidget(self.archive_panel)
+        self.start_task(token, parse_archive_task, self.on_archive_loaded, self.on_archive_failed, path)
+
     def remember_preview(self, cache_key, result):
         self.preview_cache[cache_key] = result
         result_keys = [key for key in self.preview_cache if isinstance(key, tuple)]
@@ -770,24 +1446,23 @@ class ZombiManager(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Open BFZ Archive", "", "BFZ Archives (*.bfz);;All Files (*)")
         if not path:
             return
-        self.archive_token += 1
-        token = self.archive_token
-        self.statusBar().showMessage(f"Loading {os.path.basename(path)}...")
-        self.browser_subtitle.setText(f"loading {os.path.basename(path)}...")
-        self.export_all_btn.setEnabled(False)
-        self.start_task(token, parse_archive_task, self.on_archive_loaded, self.on_archive_failed, path)
+        self.load_archive(path)
 
     def on_archive_loaded(self, token: int, archive: bfz.BFZArchive):
         if token != self.archive_token:
             return
         self.archive = archive
         self.current_archive_path = archive.path
+        self.texture_ref_cache_path = None
+        self.texture_ref_cache = {}
         self.preview_cache.clear()
         self.preview_token += 1
         self.preview.clear()
         self.populate_tree()
         self.export_all_btn.setEnabled(True)
-        self.browser_subtitle.setText(f"{len(archive.file_entries):,} files")
+        info = self.archive_info_for_path(archive.path)
+        self.archive_title.setText(info.display_name if info else os.path.basename(archive.path))
+        self.browser_subtitle.setText(f"{os.path.basename(archive.path)} · {len(archive.file_entries):,} files")
         self.statusBar().showMessage(f"Loaded {os.path.basename(archive.path)}")
         self.setWindowTitle(f"ZOMBI Manager - {os.path.basename(archive.path)}")
 
@@ -824,9 +1499,14 @@ class ZombiManager(QMainWindow):
                     key = (id(parent_item), part)
                     if key not in root_map:
                         if is_leaf:
-                            columns = [part, f"{entries[0].size:,}", file_kind(entries[0].name)]
+                            columns = [
+                                part,
+                                f"{entries[0].size:,}",
+                                file_kind(entries[0].name),
+                                entry_key_text(entries[0]),
+                            ]
                         else:
-                            columns = [part, "", "Folder"]
+                            columns = [part, "", "Folder", ""]
                         item = QTreeWidgetItem(columns)
                         if parent_item is None:
                             self.tree.addTopLevelItem(item)
@@ -847,6 +1527,7 @@ class ZombiManager(QMainWindow):
                                     f"Variant {dup_index + 1}",
                                     f"{dup_entry.size:,}",
                                     file_kind(dup_entry.name),
+                                    entry_key_text(dup_entry),
                                 ])
                                 sub.setData(0, Qt.UserRole, dup_entry)
                                 item.addChild(sub)
@@ -879,6 +1560,41 @@ class ZombiManager(QMainWindow):
 
         for index in range(self.tree.topLevelItemCount()):
             update_item(self.tree.topLevelItem(index))
+
+    def archive_key_map(self) -> Dict[int, list]:
+        if not self.archive:
+            return {}
+        key_map: Dict[int, list] = {}
+        for archive_entry in self.archive.file_entries:
+            if archive_entry.key:
+                key_map.setdefault(archive_entry.key, []).append(archive_entry.name)
+        return key_map
+
+    def archive_texture_ref_map(self) -> Dict[int, list]:
+        if not self.archive:
+            return {}
+        if self.texture_ref_cache_path == self.archive.path:
+            return self.texture_ref_cache
+
+        ref_map: Dict[int, list] = {}
+        for archive_entry in self.archive.file_entries:
+            if not archive_entry.name.lower().endswith(".tex"):
+                continue
+            try:
+                descriptor = material_format.parse_tex(
+                    self.archive.read_file_bytes(archive_entry),
+                    archive_entry.name,
+                )
+            except Exception:
+                continue
+            if descriptor.file_key is None:
+                continue
+            ref_map.setdefault(descriptor.file_key & 0xFFFFFFFF, []).append(archive_entry.name)
+            ref_map.setdefault((descriptor.file_key - 1) & 0xFFFFFFFF, []).append(archive_entry.name)
+
+        self.texture_ref_cache_path = self.archive.path
+        self.texture_ref_cache = ref_map
+        return ref_map
 
     def selected_entry(self) -> Optional[bfz.BFZFileEntry]:
         item = self.tree.currentItem()
@@ -919,6 +1635,77 @@ class ZombiManager(QMainWindow):
                     return
                 self.preview.set_loading(os.path.basename(entry.name), "decoding TDT texture...")
                 self.start_task(token, build_tdt_preview_task, self.on_tdt_preview_ready, self.on_preview_failed, entry.name, data)
+                self.preview_cache[token] = cache_key
+                return
+
+            if lower.endswith(".wor"):
+                cached = self.preview_cache.get(cache_key)
+                if cached:
+                    subtitle, body, meta = cached
+                    self.preview.set_text(os.path.basename(entry.name), subtitle, body, meta)
+                    return
+                key_map = self.archive_key_map()
+                self.preview.set_loading(os.path.basename(entry.name), "reading world refs...")
+                self.start_task(token, build_wor_preview_task, self.on_text_preview_ready, self.on_preview_failed, entry.name, data, key_map)
+                self.preview_cache[token] = cache_key
+                return
+
+            if lower.endswith(".obj"):
+                cached = self.preview_cache.get(cache_key)
+                if cached:
+                    subtitle, body, meta = cached
+                    self.preview.set_text(os.path.basename(entry.name), subtitle, body, meta)
+                    return
+                self.preview.set_loading(os.path.basename(entry.name), "reading game object...")
+                self.start_task(
+                    token,
+                    build_obj_preview_task,
+                    self.on_text_preview_ready,
+                    self.on_preview_failed,
+                    entry.name,
+                    data,
+                    self.archive_key_map(),
+                )
+                self.preview_cache[token] = cache_key
+                return
+
+            if lower.endswith(SIDECAR_PREVIEW_EXTS):
+                cached = self.preview_cache.get(cache_key)
+                if cached:
+                    subtitle, body, meta = cached
+                    self.preview.set_text(os.path.basename(entry.name), subtitle, body, meta)
+                    return
+                texture_ref_map = self.archive_texture_ref_map() if lower.endswith(".mta") else {}
+                self.preview.set_loading(os.path.basename(entry.name), "reading sidecar data...")
+                self.start_task(
+                    token,
+                    build_sidecar_preview_task,
+                    self.on_text_preview_ready,
+                    self.on_preview_failed,
+                    entry.name,
+                    data,
+                    self.archive_key_map(),
+                    texture_ref_map,
+                )
+                self.preview_cache[token] = cache_key
+                return
+
+            if lower.endswith(".mdf"):
+                cached = self.preview_cache.get(cache_key)
+                if cached:
+                    subtitle, body, meta = cached
+                    self.preview.set_text(os.path.basename(entry.name), subtitle, body, meta)
+                    return
+                self.preview.set_loading(os.path.basename(entry.name), "reading modifier data...")
+                self.start_task(
+                    token,
+                    build_mdf_preview_task,
+                    self.on_text_preview_ready,
+                    self.on_preview_failed,
+                    entry.name,
+                    data,
+                    self.archive_key_map(),
+                )
                 self.preview_cache[token] = cache_key
                 return
 
@@ -1107,22 +1894,45 @@ class ZombiManager(QMainWindow):
         if not output_dir:
             return
         try:
-            progress = QProgressDialog("Exporting archive...", "Cancel", 0, len(self.archive.file_entries), self)
+            progress = QProgressDialog("Exporting archive...", "Cancel", 0, len(self.archive.file_entries) + 1, self)
             progress.setWindowModality(Qt.WindowModal)
             progress.show()
             QApplication.processEvents()
+            exported_entries = []
+            export_paths = self.archive.export_path_map()
+            canceled = False
             for index, entry in enumerate(self.archive.file_entries):
                 data = self.archive.read_file_bytes(entry)
-                output_path = os.path.join(output_dir, entry.name.replace("\\", "/"))
+                relative_path = export_paths.get(entry.index, self.archive.normalized_archive_path(entry.name))
+                output_path = os.path.join(output_dir, relative_path)
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
                 with open(output_path, "wb") as handle:
                     handle.write(data)
+                exported_entries.append(entry)
                 progress.setValue(index + 1)
                 QApplication.processEvents()
                 if progress.wasCanceled():
+                    canceled = True
                     break
+            manifest_path = ""
+            if exported_entries:
+                progress.setLabelText("Writing manifest...")
+                manifest_path = self.archive.write_manifest(output_dir, exported_entries, export_paths)
+                progress.setValue(len(self.archive.file_entries) + 1)
+                QApplication.processEvents()
             progress.close()
-            QMessageBox.information(self, "Done", f"Exported {len(self.archive.file_entries):,} files.")
+            if canceled:
+                QMessageBox.information(
+                    self,
+                    "Export canceled",
+                    f"Exported {len(exported_entries):,} file(s) before canceling.\nManifest:\n{manifest_path}",
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "Done",
+                    f"Exported {len(exported_entries):,} files.\nManifest:\n{manifest_path}",
+                )
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", f"Failed to export archive:\n{exc}\n\n{traceback.format_exc()}")
 

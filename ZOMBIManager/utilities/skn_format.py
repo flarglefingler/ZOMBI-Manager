@@ -1,5 +1,3 @@
-"""parser for lyn skn skeleton files"""
-
 from __future__ import annotations
 
 import os

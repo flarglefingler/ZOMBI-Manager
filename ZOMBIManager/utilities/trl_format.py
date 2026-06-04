@@ -34,6 +34,7 @@ DEFAULT_STATIC_ROTATION_VARIANT = "legacy_be_xyz"
 ROTATION_MODE_ABSOLUTE = "absolute"
 ROTATION_MODE_REST_DELTA = "rest_delta"
 
+# some debugging bullshit for when i was trying to fix animation rots, pls ignore (todo: remove later)
 LEGACY_ROTATION_VARIANTS: dict[str, tuple[tuple[int, int, int], int]] = {
     "legacy_be_xyz": ((0, 1, 2), 1),
     "legacy_be_xzy": ((0, 2, 1), 1),
@@ -562,8 +563,8 @@ def _translation_table_is_plausible(data: bytes, offset: int, count: int) -> boo
 
 
 def _decode_frame_windows(data: bytes, trl: TrlFile) -> List[TrlFrameWindow]:
-    """Read the coarse frame windows used by sampled/compressed TRL files.
-
+    """
+    Read the coarse frame windows used by sampled/compressed TRL files.
     Moving tracks store most window pairs after the packed stream descriptors,
     but the last few pairs can sit at the start of packed_keys. Keeping this in
     one place makes the later key-table scan much less guessy.
@@ -918,11 +919,11 @@ def decode_trl_sampled_animation(
     rotation_variant: str = DEFAULT_ROTATION_VARIANT,
     rotation_variants_by_bone: Mapping[int, str] | None = None,
 ) -> TrlSampledAnimation:
-    """Decode full sampled key tables from moving TRL files.
-
-    This does not yet unpack every in-between bitstream delta. It decodes the
+    """
+    Decode full sampled key tables from moving TRL files.
+    For now it doesnt unpack every in between bitstream delta (im too dumb)
+    But it does decode the
     full rotation/translation pose tables that mark each compressed frame
-    window, which is the first real animated layer after the base pose.
     """
 
     notes: List[str] = []
@@ -1086,9 +1087,9 @@ def _decode_dense_gap_samples(
         {} for _frame_index in range(window.frame_count)
     ]
 
-    # Masks are channel-major: all frames for bone/channel 0, then all frames
+    # Masks are channel major- all frames for bone/channel 0, then all frames
     # for bone/channel 1, and so on. Reading them frame-major gives plausible
-    # record counts but assigns rotations to the wrong bones.
+    # record counts but assigns rotations to the wrong bones. (ubisoft what the fuck)
     for channel_index, bone_index in enumerate(animated_rotation_group.bone_indices):
         channel_start = rotation_start + channel_index * window.frame_count
         for frame_offset in range(window.frame_count):
@@ -1205,11 +1206,8 @@ def decode_trl_base_pose(
     static_rotation_variant: str = DEFAULT_STATIC_ROTATION_VARIANT,
     rotation_variants_by_bone: Mapping[int, str] | None = None,
 ) -> TrlBasePose:
-    """Decode the raw/base pose data that appears before the packed delta keys.
-
-    This is intentionally conservative. It handles the constant channels and the
-    raw base tables we can identify, but it leaves the bit-packed delta stream
-    untouched until that layout is fully mapped.
+    """
+    jade engine bullshit incoming (lyn aint much diff)
     """
 
     rotations: Dict[int, Tuple[float, float, float, float]] = {}

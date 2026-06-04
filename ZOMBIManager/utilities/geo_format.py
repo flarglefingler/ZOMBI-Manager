@@ -1,5 +1,3 @@
-"""geo parsing for the lyn meshes."""
-
 from __future__ import annotations
 
 import struct
@@ -51,6 +49,7 @@ class RenderIndexBlock:
     word_count: int
     aux_count: int
     words: List[int]
+    position_mode: str = "raw"
 
 
 @dataclass
@@ -289,19 +288,24 @@ def iter_source_triangle_blocks(data: bytes, header: GeoHeader) -> Iterable[Sour
                 and triangle_end <= len(data)
             ):
                 raw_name = data[name_offset:triangle_offset]
+                stripped_name = raw_name.rstrip(b"\0")
                 printable = sum(
                     1
-                    for byte in raw_name.rstrip(b"\0")
+                    for byte in stripped_name
                     if byte in b" _-.()0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
                 )
-                if printable >= max(1, len(raw_name.rstrip(b"\0")) - 2):
+                name_is_valid = (
+                    not stripped_name
+                    or printable >= max(1, len(stripped_name) - 2)
+                )
+                if name_is_valid:
                     yield SourceTriangleBlock(
                         preamble_offset=offset,
                         triangle_offset=triangle_offset,
                         triangle_count=triangle_count,
                         element_index=element_index,
                         flags=flags,
-                        name=clean_geo_name(raw_name, "source_mesh"),
+                        name=clean_geo_name(raw_name, f"element_{element_index}"),
                     )
 
         sentinel_offset = data.find(SOURCE_TRIANGLE_SENTINEL, sentinel_offset + 1)
@@ -565,32 +569,86 @@ def iter_render_index_blocks(data: bytes) -> Iterable[RenderIndexBlock]:
         offset = data.find(RENDER_INDEX_MARKER, offset + 1)
 
 
+def read_render_position_remap(data: bytes, block: RenderIndexBlock, header: GeoHeader) -> List[int] | None:
+    offset = block.payload_offset + block.word_count * 2
+    if offset + 8 > len(data):
+        return None
+    if data[offset:offset + 4] not in (b"\x3f\xc8\x00\x00", b"\x7b\x48\x00\x00"):
+        return None
+
+    count = _u32(data, offset + 4)
+    values_offset = offset + 8
+    if count <= 0 or values_offset + count * 2 > len(data):
+        return None
+
+    values = [
+        _u16(data, values_offset + index * 2)
+        for index in range(count)
+    ]
+    if any(value >= header.position_count for value in values):
+        return None
+    return values
+
+
+def render_position_words(
+    data: bytes,
+    block: RenderIndexBlock,
+    header: GeoHeader,
+) -> tuple[List[int], str] | None:
+    remap = read_render_position_remap(data, block, header)
+    if remap is not None and all(word < len(remap) for word in block.words):
+        return [remap[word] for word in block.words], "remap"
+
+    if all(word < header.position_count for word in block.words):
+        return list(block.words), "direct"
+
+    return None
+
+
 def find_render_index_block(
     data: bytes,
     header: GeoHeader,
 ) -> RenderIndexBlock | None:
     best_score = None
     best_block = None
-    minimum_words = max(header.primary_uv_count * 3, MIN_INDEX_RUN_WORDS)
+    previous_block: RenderIndexBlock | None = None
 
     for block in iter_render_index_blocks(data):
-        if block.word_count < minimum_words or block.word_count % 3:
+        if block.word_count < 3 or block.word_count % 3:
+            previous_block = block
             continue
 
-        sample_words = block.words[:minimum_words]
-        in_range = sum(1 for word in sample_words if word < header.position_count)
-        if in_range < len(sample_words) * 0.98:
+        resolved = render_position_words(data, block, header)
+        if resolved is None:
+            previous_block = block
+            continue
+        resolved_words, resolve_mode = resolved
+
+        # static/world GEOs often only have the paired render-cache blocks.
+        # the first block indexes render vertices, the second block carries the
+        # point index stream. Keep the second block even for tiny flat meshes.
+        paired = (
+            previous_block is not None
+            and previous_block.word_count == block.word_count
+            and previous_block.aux_count == block.aux_count
+            and previous_block.marker_offset < block.marker_offset
+        )
+        if not paired and block.word_count < MIN_INDEX_RUN_WORDS:
+            previous_block = block
             continue
 
-        max_sample = max(sample_words) if sample_words else header.position_count
-        if max_sample >= header.position_count:
-            continue
-
-            # the geometry block indexes points; its paired render-vertex block indexes a larger domain.
-        score = (-block.word_count, block.marker_offset)
+        score = (0 if paired else 1, -block.word_count, block.marker_offset)
         if best_score is None or score < best_score:
             best_score = score
-            best_block = block
+            best_block = RenderIndexBlock(
+                marker_offset=block.marker_offset,
+                payload_offset=block.payload_offset,
+                word_count=block.word_count,
+                aux_count=block.aux_count,
+                words=resolved_words,
+                position_mode=resolve_mode,
+            )
+        previous_block = block
 
     return best_block
 
@@ -812,31 +870,15 @@ def parse_mesh_parts(
     render_block = find_render_index_block(data, header)
     if render_block:
         total_faces = render_block.word_count // 3
-        parts: List[MeshPart] = []
-
-        if header.submesh_hint > 1 and 0 < header.primary_uv_count < total_faces:
-            ranges = [
-                ("main", 0, header.primary_uv_count),
-                ("submesh_1", header.primary_uv_count, total_faces),
-            ]
-        else:
-            ranges = [("main", 0, total_faces)]
-
-        for name, start_face, end_face in ranges:
-            faces = render_block_faces(render_block.words, points, start_face, end_face)
-            if not faces:
-                continue
-
+        faces = render_block_faces(render_block.words, points, 0, total_faces)
+        if faces:
             run = IndexRun(
-                offset=render_block.payload_offset + start_face * 6,
-                word_count=(end_face - start_face) * 3,
+                offset=render_block.payload_offset,
+                word_count=render_block.word_count,
                 face_count=len(faces),
-                mode="render_index_block_be",
+                mode=f"render_index_block_be_{render_block.position_mode}",
             )
-            parts.append(MeshPart(name=name, faces=faces, run=run))
-
-        if parts:
-            return parts
+            return [MeshPart(name="main", faces=faces, run=run)]
 
     table_faces, table_runs = find_triangle_table(data, header, points)
     if table_faces:

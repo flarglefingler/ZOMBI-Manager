@@ -1,5 +1,3 @@
-"""previewers for certain files"""
-
 from typing import List, Optional, Dict, Tuple
 from io import BytesIO
 import wave
