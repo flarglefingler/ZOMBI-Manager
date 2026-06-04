@@ -79,3 +79,5 @@ python zombiManager.py
 ZOMBI-Manager is still very much a research tool.
 
 Extraction and inspection are the most stable parts. Importing, repacking, and full modding workflows are still unfinished and should be treated as experimental.
+
+README was automated with Copilot (I was too lazy to write it myself so sorry if it looks ugly, its due for a rewrite anyway)
